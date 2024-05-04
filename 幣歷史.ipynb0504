@@ -1,0 +1,353 @@
+# 22版 $$$$$$$$$$$$$$$$$$$$
+
+
+
+
+# -*- coding: utf-8 -*-
+
+# 取幣歷
+import requests
+import json
+import time
+import pandas as pd
+from datetime import datetime, timedelta
+import sqlite3
+import sys
+from random import randint
+
+# _UpGitHub文
+from github import Github
+from google.colab import userdata
+
+
+class HistoricalData(object):
+    """
+    此類提供了一個方法，用於在用戶指定的時間段內收集指定加密貨幣的歷史價格數據。該類利用了CoinBase Pro API來提取歷史數據，提供了一種高效的數據提取方法。
+    請注意，歷史價格數據可能不完整，因為當沒有可用的數據時（Coinbase Pro API文檔）不會發布數據。
+    :param: ticker: 單一的加密貨幣代碼。 (str)
+    :param: granularity: 價格數據的頻率，以秒為單位，可以是：60、300、900、3600、21600、86400之一。 (int)
+    :param: start_date: 格式為YYYY-MM-DD-HH-MM的日期字符串。 (str)
+    :param: end_date: 格式為YYYY-MM-DD-HH-MM的日期字符串，默認為現在。 (str)
+    :param: verbose: 提取過程中的打印，默認為True。 (bool)
+    :returns: data: 包含請求的加密貨幣數據的Pandas DataFrame。 (pd.DataFrame)
+    """
+
+    def __init__(self,ticker,granularity,start_date,end_date=None,verbose=True):
+        if verbose:
+            print("檢查輸入參數是否符合格式要求。")
+        if not all(isinstance(v, str) for v in [ticker, start_date]):
+            raise TypeError("ticker和start_date參數必須是字符串或None類型。")
+        if not isinstance(end_date, (str, type(None))):
+            raise TypeError("end_date參數必須是字符串或None類型。")
+        if not isinstance(verbose, bool):
+            raise TypeError("verbose參數必須是布林值。")
+        if isinstance(granularity, int) is False:
+            raise TypeError("granularity必須是整數對象。")
+        if granularity not in [60, 300, 900, 3600, 21600, 86400]:
+            raise ValueError("granularity參數必須是60、300、900、3600、21600或86400秒之一。")
+
+        if not end_date:
+            end_date = datetime.today().strftime("%Y-%m-%d-%H-%M")
+        else:
+            end_date_datetime = datetime.strptime(end_date, '%Y-%m-%d-%H-%M')
+            start_date_datetime = datetime.strptime(start_date, '%Y-%m-%d-%H-%M')
+            if start_date_datetime >= end_date_datetime:
+                raise ValueError("end_date參數不能早於start_date參數。")
+
+        self.ticker = ticker
+        self.granularity = granularity
+        self.start_date = start_date
+        self.start_date_string = None
+        self.end_date = end_date
+        self.end_date_string = None
+        self.verbose = verbose
+
+    def _ticker_checker(self):
+        """此輔助函數檢查CoinBase Pro API上是否有這個代碼。"""
+        if self.verbose:
+            print("檢查用戶提供的代碼是否在CoinBase Pro API上可用。")
+
+        tkr_response = requests.get("https://api.pro.coinbase.com/products")
+        if tkr_response.status_code in [200, 201, 202, 203, 204]:
+            if self.verbose:
+                print('連接到CoinBase Pro API。')
+            response_data = pd.json_normalize(json.loads(tkr_response.text))
+            ticker_list = response_data["id"].tolist()
+
+        elif tkr_response.status_code in [400, 401, 404]:
+            if self.verbose:
+                print("狀態碼: {}，到CoinBase Pro API的請求錯誤。".format(tkr_response.status_code))
+            sys.exit()
+        elif tkr_response.status_code in [403, 500, 501]:
+            if self.verbose:
+                print("狀態碼: {}，無法連接到CoinBase Pro API。".format(tkr_response.status_code))
+            sys.exit()
+        else:
+            if self.verbose:
+                print("狀態碼: {}，連接到CoinBase Pro API時出錯。".format(tkr_response.status_code))
+            sys.exit()
+
+        if self.ticker in ticker_list:
+            if self.verbose:
+                print("在CoinBase Pro API上找到代碼'{}'，繼續提取。".format(self.ticker))
+        else:
+            raise ValueError("代碼'{}'在CoinBase Pro API上不可用。請使用Cryptocurrencies類識別正確的代碼。".format(self.ticker))
+
+    def _date_cleaner(self, date_time: (datetime, str)):
+        """此輔助函數將輸入呈現為API所需格式的日期時間。"""
+        if not isinstance(date_time, (datetime, str)):
+            raise TypeError("date_time參數必須是datetime類型。")
+        if isinstance(date_time, str):
+            output_date = datetime.strptime(date_time, '%Y-%m-%d-%H-%M').isoformat()
+        else:
+            #output_date = date_time.strftime("%Y-%m-%d-%H-%M")
+            output_date = date_time.strftime("%Y-%m-%d, %H:%M:%S")
+            output_date = output_date[:10] + 'T' + output_date[12:]
+        return output_date
+
+
+
+    def retrieve_data(self):
+        """此函數返回數據。"""
+        if self.verbose:
+            print("格式化日期。")
+
+        self._ticker_checker()
+        self.start_date_string = self._date_cleaner(self.start_date)
+        self.end_date_string = self._date_cleaner(self.end_date)
+        start = datetime.strptime(self.start_date, "%Y-%m-%d-%H-%M")
+        end = datetime.strptime(self.end_date, "%Y-%m-%d-%H-%M")
+        request_volume = abs((end - start).total_seconds()) / self.granularity
+
+        if request_volume <= 300:
+            response = requests.get(
+                "https://api.pro.coinbase.com/products/{0}/candles?start={1}&end={2}&granularity={3}".format(
+                    self.ticker,
+                    self.start_date_string,
+                    self.end_date_string,
+                    self.granularity))
+            if response.status_code in [200, 201, 202, 203, 204]:
+                if self.verbose:
+                    print('從Coinbase Pro API檢索數據。')
+                data = pd.DataFrame(json.loads(response.text))
+                if not data.empty:  # 檢查 DataFrame 是否為空
+                    data.columns = ["time", "low", "high", "open", "close", "volume"]
+                    data["time"] = pd.to_datetime(data["time"], unit='s')
+                    data = data[data['time'].between(start, end)]
+                    data.set_index("time", drop=True, inplace=True)
+                    data.sort_index(ascending=True, inplace=True)
+                    data.drop_duplicates(subset=None, keep='first', inplace=True)
+                    if self.verbose:
+                        print('返回數據。')
+                    return data
+                else:
+                    if self.verbose:
+                        print("API返回的數據為空。")
+                    return pd.DataFrame()  # 返回一個空的DataFrame
+            else:
+                if self.verbose:
+                    print("未能從CoinBase Pro API獲取數據。")
+                return pd.DataFrame()  # 返回一個空的DataFrame
+        else:
+            # API限制:
+            max_per_mssg = 300
+            data = pd.DataFrame()
+            for i in range(int(request_volume / max_per_mssg) + 1):
+                provisional_start = start + timedelta(0, i * (self.granularity * max_per_mssg))
+                provisional_start = self._date_cleaner(provisional_start)
+                provisional_end = start + timedelta(0, (i + 1) * (self.granularity * max_per_mssg))
+                provisional_end = self._date_cleaner(provisional_end)
+
+                print("臨時開始時間: {}".format(provisional_start))
+                print("臨時結束時間: {}".format(provisional_end))
+                response = requests.get(
+                    "https://api.pro.coinbase.com/products/{0}/candles?start={1}&end={2}&granularity={3}".format(
+                        self.ticker,
+                        provisional_start,
+                        provisional_end,
+                        self.granularity))
+
+                if response.status_code in [200, 201, 202, 203, 204]:
+                    if self.verbose:
+                        print('提取第{}部分的數據（共{}部分）'.format(i + 1, (int(request_volume / max_per_mssg) + 1)))
+                    dataset = pd.DataFrame(json.loads(response.text))
+                    if not dataset.empty:
+                        data = pd.concat([data, dataset], ignore_index=True)
+                        time.sleep(randint(0, 2))
+                    else:
+                        print("""CoinBase Pro API沒有在'{}'開始時提供可用的數據。
+                        嘗試較晚的日期:'{}'""".format(self.ticker, self.start_date, provisional_start))
+                        time.sleep(randint(0, 2))
+                elif response.status_code in [400, 401, 404]:
+                    if self.verbose:
+                        print("狀態碼: {}，到CoinBase Pro API的請求錯誤。".format(response.status_code))
+                    sys.exit()
+                elif response.status_code in [403, 500, 501]:
+                    if self.verbose:
+                        print("狀態碼: {}，無法連接到CoinBase Pro API。".format(response.status_code))
+                    sys.exit()
+                else:
+                    if self.verbose:
+                        print("狀態碼: {}，連接到CoinBase Pro API時出錯。".format(response.status_code))
+                    sys.exit()
+            if not data.empty:  # 檢查 DataFrame 是否為空
+                data.columns = ["time", "low", "high", "open", "close", "volume"]
+                data["time"] = pd.to_datetime(data["time"], unit='s')
+                data = data[data['time'].between(start, end)]
+                data.set_index("time", drop=True, inplace=True)
+                data.sort_index(ascending=True, inplace=True)
+                data.drop_duplicates(subset=None, keep='first', inplace=True)
+            return data
+
+
+
+
+
+
+class Aki野():
+
+
+
+  def _UpGitHub文(件名):
+    # 請替換以下變量值為你的 GitHub 帳號名稱、密碼或個人訪問令牌以及倉庫名稱
+    username = "98672794"
+    password_or_token = userdata.get('github')
+    repository_name = "-202405"
+    # 初始化 GitHub 物件
+    g = Github(username, password_or_token)
+    # 獲取倉庫
+    repo = g.get_user().get_repo(repository_name)
+    # 要上傳的文件路徑
+    file_path = 件名 #"crypto_data.db"
+    # 上傳文件
+    with open(file_path, 'rb') as file:
+        content = file.read()
+        # 獲取現有文件的SHA值
+        sha = None
+        try:
+            sha = repo.get_contents(file_path).sha
+        except Exception as e:
+            pass
+        if sha is None:
+            sha = ""
+        # 上傳文件
+        repo.update_file(file_path, "Commit Message", content, sha)
+    return 件名,'上傳至GitHub成功'
+
+
+
+  # 下载GitHub數據庫
+  def _download_file(url, filename):
+      # 发送HTTP GET请求下载文件
+      response = requests.get(url)
+      
+      # 检查响应状态码
+      if response.status_code == 200:
+          # 写入文件
+          with open(filename, 'wb') as f:
+              f.write(response.content)
+          return (f"文件 {filename} 下载成功！")
+      else:
+          return (f"下载文件 {filename} 失败，HTTP状态码: {response.status_code}")
+
+
+
+
+  def _找歷(始, 幣名, 線期, github_owner, github_repo):
+      start_date = 始
+      幣名2 = 幣名.replace('-', '_')
+      db_filename = 幣名2 + '_歷.db'
+
+      # 下载GitHub數據庫到本機
+      github_db_url = f"https://raw.githubusercontent.com/{github_owner}/{github_repo}/main/{db_filename}"
+      print(Aki野._download_file(github_db_url, db_filename))
+
+      #try:
+      #    github_db_url = f"https://raw.githubusercontent.com/{github_owner}/{github_repo}/main/{db_filename}"
+      #    Aki野._download_file(github_db_url, db_filename)
+      #except Exception as e:
+      #    print('下载GitHub数据库出错:', e)
+
+
+      # 连接数据库
+      conn = sqlite3.connect(db_filename)
+      # 查询数据库表中是否存在名为 幣名2+'_歷' 的表
+      cursor = conn.cursor()
+      cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='{}'".format(幣名2+'_歷'))
+      table_exists = cursor.fetchone()
+      cursor.close()
+
+      # 如果数据库表不存在，则将 start_date 设置为输入的起始日期
+      if not table_exists:
+          start_date = 始
+      else:
+          # 查询数据库表中最后一行的日期
+          cursor = conn.cursor()
+          cursor.execute("SELECT time FROM {} ORDER BY time DESC LIMIT 1".format(幣名2+'_歷'))
+          last_date = cursor.fetchone()
+          cursor.close()
+          # 如果数据库表中存在日期数据，则将 start_date 设置为数据库表中最后一行的日期
+          if last_date:
+              start_date = last_date[0]
+
+      # 初始化 end_date
+      end_date = (pd.to_datetime(start_date) + pd.DateOffset(days=1)).strftime('%Y-%m-%d-%H-%M')
+
+      while start_date <= end_date:
+          # 更新下一个循环的结束日期为下一个日期
+          end_date = (pd.to_datetime(start_date) + pd.DateOffset(days=1)).strftime('%Y-%m-%d-%H-%M')
+
+          # 格式化 start_date
+          start_date = pd.to_datetime(start_date.split()[0]+'-00-00').strftime('%Y-%m-%d-%H-%M')
+
+
+          # 创建 HistoricalData 实例
+          historical_data = HistoricalData(幣名, 線期, start_date, end_date)
+
+          # 获取数据
+          data = historical_data.retrieve_data()
+
+          # 將數據保存到數據庫
+          if not data.empty:
+              data.to_sql(幣名2+'_歷', conn, if_exists='append', index=True)
+
+          # Up到GitHub
+          print(Aki野._UpGitHub文(幣名2+'_歷.db'))
+
+          # 更新下一个循环的起始日期为下个月的第一天
+          start_date = pd.to_datetime(start_date) + pd.DateOffset(days=1)
+          start_date = start_date.strftime('%Y-%m-%d-%H-%M')
+
+          # 等待一段时间，以避免过度请求 API
+          time.sleep(5)
+
+      # 關閉數據庫連接
+      conn.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+
+    # 找coin data
+    始 = '2013-01-01-00-00'
+    幣名 = 'BTC-USD'
+    線期 = 60
+
+    # GitHub仓库中的.db文件的URL
+    owner = "98672794"
+    repo = "-202405"
+
+    Aki野._找歷(始, 幣名, 線期, owner, repo)
+
+# 22版 $$$$$$$$$$$$$$$$$$$$
